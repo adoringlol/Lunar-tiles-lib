@@ -1,11 +1,18 @@
+param(
+    # Minecraft 1.8.9 client jar with MCP (mcp-named) names, e.g. the one Weave's Gradle plugin
+    # writes to <Weave-Loader>\api\v1_8\.gradle\weave\client-mcp-named.jar.
+    [string] $MinecraftJar = (Join-Path (Split-Path $PSScriptRoot -Parent) 'Weave-Loader\api\v1_8\.gradle\weave\client-mcp-named.jar'),
+    # Gson, Guava and LWJGL 2 jars; found in the Gradle cache (or Minecraft's libraries) when not given.
+    [string] $GsonJar,
+    [string] $GuavaJar,
+    [string] $LwjglJar,
+    # Where to copy the built jar; skipped when the folder does not exist.
+    [string] $ModsDir = (Join-Path $env:USERPROFILE '.weave\mods\1.8.9')
+)
+
 $ErrorActionPreference = 'Stop'
 
 $root = $PSScriptRoot
-$workspace = Split-Path $root -Parent
-$weave = Join-Path $workspace 'Weave-Loader'
-$loader = Join-Path $weave 'loader\build\libs\weave-lunar-loader-1.3.3-all.jar'
-$versionApi = Join-Path $weave 'api\v1_8\build\libs\weave-v1_8-1.3.3.jar'
-$gameJar = Join-Path $weave 'api\v1_8\.gradle\weave\client-mcp-named.jar'
 $gradleCache = Join-Path $env:USERPROFILE '.gradle\caches\modules-2\files-2.1'
 
 # Gradle stores each artifact under a content-hash directory that changes whenever the cache is
@@ -14,31 +21,46 @@ function Resolve-CachedJar([string] $group, [string] $artifact, [string] $patter
     $base = Join-Path $gradleCache "$group\$artifact"
     if (-not (Test-Path -LiteralPath $base)) { return $null }
     Get-ChildItem -LiteralPath $base -Recurse -Filter $pattern -File |
+        Where-Object { $_.Name -notlike '*-sources.jar' } |
         Sort-Object Name |
         Select-Object -First 1 -ExpandProperty FullName
 }
 
-# Only APIs that already exist in Minecraft 1.8.9's Gson 2.2.4 are used; any cached Gson compiles them.
-$gsonJar = Resolve-CachedJar 'com.google.code.gson' 'gson' 'gson-2.*.jar'
-$lwjglJar = Resolve-CachedJar 'org.lwjgl.lwjgl' 'lwjgl' 'lwjgl-2.9.*.jar'
+# Only APIs that already exist in Minecraft 1.8.9's Gson 2.2.4 are used; any Gson 2.x compiles them.
+if (-not $GsonJar) { $GsonJar = Resolve-CachedJar 'com.google.code.gson' 'gson' 'gson-2.*.jar' }
+if (-not $LwjglJar) { $LwjglJar = Resolve-CachedJar 'org.lwjgl.lwjgl' 'lwjgl' 'lwjgl-2.9.*.jar' }
+# Only needed for the return type of Minecraft.addScheduledTask; any version has it.
+if (-not $GuavaJar) { $GuavaJar = Resolve-CachedJar 'com.google.guava' 'guava' 'guava-*.jar' }
+if (-not $GuavaJar) {
+    $GuavaJar = Join-Path $env:APPDATA '.minecraft\libraries\com\google\guava\guava\17.0\guava-17.0.jar'
+}
+$stubClasses = Join-Path $root 'build\stubs'
 $classes = Join-Path $root 'build\classes'
 $resources = Join-Path $root 'src\main\resources'
 $output = Join-Path $root 'build\lunar-mod-api-1.0.0.jar'
-$installerMods = Join-Path $workspace 'Weave-Mod-Installer\payload\mods'
-$liveMods = Join-Path $env:USERPROFILE '.weave\mods\1.8.9'
 
-foreach ($dependency in @($loader, $versionApi, $gameJar, $gsonJar, $lwjglJar)) {
+foreach ($dependency in @($MinecraftJar, $GsonJar, $GuavaJar, $LwjglJar)) {
     if (-not $dependency -or -not (Test-Path -LiteralPath $dependency -PathType Leaf)) {
         throw "Missing build dependency: $dependency"
     }
 }
 
-Remove-Item -LiteralPath $classes -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Path $classes -Force | Out-Null
+foreach ($directory in @($stubClasses, $classes)) {
+    Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+}
+
+# Weave's ModInitializer is compiled from a stub and left out of the jar; Weave provides it at runtime.
+$stubs = Get-ChildItem -LiteralPath (Join-Path $root 'src\stubs\java') -Recurse -Filter '*.java' |
+    ForEach-Object { $_.FullName }
+javac --release 8 -encoding UTF-8 -proc:none -Xlint:-options -d $stubClasses $stubs
+if ($LASTEXITCODE -ne 0) {
+    throw "javac (stubs) failed with exit code $LASTEXITCODE"
+}
 
 $sources = Get-ChildItem -LiteralPath (Join-Path $root 'src\main\java') -Recurse -Filter '*.java' |
     ForEach-Object { $_.FullName }
-$classpath = "$loader;$versionApi;$gameJar;$gsonJar;$lwjglJar"
+$classpath = "$stubClasses;$MinecraftJar;$GsonJar;$GuavaJar;$LwjglJar"
 
 javac --release 8 -encoding UTF-8 -proc:none -Xlint:-options -cp $classpath -d $classes $sources
 if ($LASTEXITCODE -ne 0) {
@@ -52,10 +74,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "jar failed with exit code $LASTEXITCODE"
 }
 
-foreach ($destination in @($installerMods, $liveMods)) {
-    if (Test-Path -LiteralPath $destination -PathType Container) {
-        Copy-Item -LiteralPath $output -Destination (Join-Path $destination 'lunar-mod-api-1.0.0.jar') -Force
-    }
+if ($ModsDir -and (Test-Path -LiteralPath $ModsDir -PathType Container)) {
+    Copy-Item -LiteralPath $output -Destination (Join-Path $ModsDir 'lunar-mod-api-1.0.0.jar') -Force
 }
 
 Write-Host "Built $output"

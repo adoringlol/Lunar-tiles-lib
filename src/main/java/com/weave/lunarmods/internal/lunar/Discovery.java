@@ -1,7 +1,6 @@
 package com.weave.lunarmods.internal.lunar;
 
 import com.weave.lunarmods.internal.Log;
-import net.weavemc.api.lunar.LunarClient;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.GenericArrayType;
@@ -34,7 +33,7 @@ import java.util.function.Supplier;
  * <p>Lunar renames its classes and members every release, so nothing here refers to a name. Each
  * member is identified by structure: types, signatures, the few names Lunar keeps ({@code getId},
  * {@code load}, {@code get}, enum constants) and, for option builders, the UI type a builder reports.
- * The result is cached per Lunar build through the loader's {@link LunarClient#writeCache}, so this
+ * The result is cached per Lunar build in the Weave folder ({@link LunarRuntime#writeCache}), so this
  * scan runs once after each Lunar update and later launches only restore the listed members.
  */
 final class Discovery {
@@ -49,12 +48,7 @@ final class Discovery {
 
     /** Restores a cached resolution for this Lunar build, or returns {@code null} to request a scan. */
     static Map<String, Object> fromCache(ClassLoader loader) {
-        Map<String, String> entries;
-        try {
-            entries = LunarClient.readCache(NAMESPACE, loader);
-        } catch (LinkageError oldLoader) {
-            return null;
-        }
+        Map<String, String> entries = LunarRuntime.readCache(NAMESPACE, loader);
         if (entries == null || !SCHEMA.equals(entries.get("schema"))) {
             return null;
         }
@@ -98,7 +92,7 @@ final class Discovery {
             resolveHud(feature, base, new ClassSource() {
                 @Override
                 public List<Class<?>> classesIn(String packageName) {
-                    return LunarClient.loadedClasses(packageName + ".");
+                    return LunarRuntime.loadedClasses(packageName + ".");
                 }
             }, found);
         } catch (Exception | LinkageError failed) {
@@ -324,17 +318,13 @@ final class Discovery {
             entries.put(entry.getKey(), Members.encode(entry.getValue()));
             owners.add(Members.owner(entry.getValue()));
         }
-        try {
-            LunarClient.writeCache(NAMESPACE, loader, entries, owners);
-        } catch (LinkageError oldLoader) {
-            // Older loaders have no cache API; the scan simply runs again next launch.
-        }
+        LunarRuntime.writeCache(NAMESPACE, loader, entries, owners);
     }
 
     // ---- entry points -------------------------------------------------------------------------
 
     private static Class<?> findMainClass() {
-        List<Class<?>> classes = LunarClient.loadedClasses(CLIENT_PACKAGE);
+        List<Class<?>> classes = LunarRuntime.loadedClasses(CLIENT_PACKAGE);
         for (Class<?> candidate : classes) {
             String name = candidate.getName();
             if (name.indexOf('.', CLIENT_PACKAGE.length()) >= 0 || candidate.isInterface()) {

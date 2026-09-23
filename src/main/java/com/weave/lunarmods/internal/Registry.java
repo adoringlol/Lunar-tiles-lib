@@ -4,8 +4,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.weave.lunarmods.internal.lunar.LunarBridge;
 import com.weave.lunarmods.internal.lunar.LunarNotReadyException;
+import com.weave.lunarmods.internal.lunar.LunarRuntime;
 import net.minecraft.client.Minecraft;
-import net.weavemc.api.lunar.LunarClient;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -102,27 +102,19 @@ public final class Registry {
     }
 
     private static void start() {
-        boolean lunar;
-        try {
-            lunar = LunarClient.isRunning();
-        } catch (LinkageError oldLoader) {
-            lunar = false;
-        }
-        if (!lunar) {
+        // The game's context loader sees Lunar's classes and build data.
+        ClassLoader context = Thread.currentThread().getContextClassLoader();
+        final ClassLoader loader = context != null ? context : Minecraft.class.getClassLoader();
+        if (!LunarRuntime.isRunning(loader)) {
             Log.info("Lunar Client was not detected; tiles keep their default settings and no mod-menu entries are added.");
             off();
             return;
         }
-        try {
-            LunarClient.class.getMethod("readCache", String.class, ClassLoader.class);
-        } catch (NoSuchMethodException | LinkageError oldLoader) {
-            Log.warn("This Weave loader predates the Lunar runtime API; install the updated loader.jar to get mod-menu tiles.");
+        if (!LunarRuntime.canListClasses()) {
+            Log.warn("Weave did not pass Instrumentation to preInit, so Lunar's classes cannot be found; tiles are unavailable.");
             off();
             return;
         }
-        // Same loader the loader's own Lunar integration uses: it sees Lunar's classes and build data.
-        ClassLoader context = Thread.currentThread().getContextClassLoader();
-        final ClassLoader loader = context != null ? context : Minecraft.class.getClassLoader();
         attempts++;
         LunarBridge cached;
         try {

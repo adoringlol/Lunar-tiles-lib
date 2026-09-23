@@ -1,10 +1,5 @@
 package com.weave.lunarmods.internal.lunar;
 
-import net.weavemc.loader.impl.shaded.asm.ClassWriter;
-import net.weavemc.loader.impl.shaded.asm.MethodVisitor;
-import net.weavemc.loader.impl.shaded.asm.Opcodes;
-import net.weavemc.loader.impl.shaded.asm.Type;
-
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.function.BiFunction;
@@ -34,7 +29,7 @@ final class TextHudClassFactory {
     static Constructor<?> define(Constructor<?> superConstructor, Method sizes, Method value, Method width, Method height,
                                  String tileId, Object sizeValue, BiFunction<Object, Boolean, Object> text) throws Exception {
         Class<?> base = superConstructor.getDeclaringClass();
-        String baseName = Type.getInternalName(base);
+        String baseName = ClassBuilder.internalName(base);
         String packageName = baseName.substring(0, baseName.lastIndexOf('/') + 1);
         String name = packageName + "WeaveTextHud$" + tileId.replaceAll("[^A-Za-z0-9_]", "_");
         byte[] bytes = generate(name, baseName, superConstructor, sizes, value, width, height);
@@ -46,84 +41,60 @@ final class TextHudClassFactory {
 
     private static byte[] generate(String name, String base, Constructor<?> superConstructor, Method sizes, Method value,
                                    Method width, Method height) {
-        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, name, null, base, null);
-        int staticField = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC;
-        writer.visitField(staticField, SIZES, "Ljava/lang/Object;", null, null).visitEnd();
-        writer.visitField(staticField, TEXT, "Ljava/util/function/BiFunction;", null, null).visitEnd();
+        ClassBuilder builder = new ClassBuilder(name, base);
+        int staticField = ClassBuilder.ACC_PUBLIC | ClassBuilder.ACC_STATIC;
+        builder.field(staticField, SIZES, "Ljava/lang/Object;");
+        builder.field(staticField, TEXT, "Ljava/util/function/BiFunction;");
 
         // public <init>(float x, float y, Anchor anchor, boolean alignmentOption) { super(...); }
-        String constructorDescriptor = Type.getConstructorDescriptor(superConstructor);
-        MethodVisitor init = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", constructorDescriptor, null, null);
-        init.visitCode();
-        init.visitVarInsn(Opcodes.ALOAD, 0);
-        int slot = 1;
-        for (Class<?> parameter : superConstructor.getParameterTypes()) {
-            Type type = Type.getType(parameter);
-            init.visitVarInsn(type.getOpcode(Opcodes.ILOAD), slot);
-            slot += type.getSize();
-        }
-        init.visitMethodInsn(Opcodes.INVOKESPECIAL, base, "<init>", constructorDescriptor, false);
-        init.visitInsn(Opcodes.RETURN);
-        init.visitMaxs(0, 0);
-        init.visitEnd();
+        String constructorDescriptor = ClassBuilder.descriptor(superConstructor);
+        builder.method(ClassBuilder.ACC_PUBLIC, "<init>", constructorDescriptor)
+                .loadThis()
+                .loadParameters(superConstructor.getParameterTypes())
+                .invokeSpecial(base, "<init>", constructorDescriptor)
+                .returnValue(void.class);
 
         // public Sizes sizes() { return (Sizes) SIZES; }  (read by Lunar's field initializers, so static)
-        MethodVisitor sizeGetter = writer.visitMethod(Opcodes.ACC_PUBLIC, sizes.getName(), Type.getMethodDescriptor(sizes), null, null);
-        sizeGetter.visitCode();
-        sizeGetter.visitFieldInsn(Opcodes.GETSTATIC, name, SIZES, "Ljava/lang/Object;");
-        sizeGetter.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(sizes.getReturnType()));
-        sizeGetter.visitInsn(Opcodes.ARETURN);
-        sizeGetter.visitMaxs(0, 0);
-        sizeGetter.visitEnd();
+        builder.method(ClassBuilder.ACC_PUBLIC, sizes.getName(), ClassBuilder.descriptor(sizes))
+                .getStatic(name, SIZES, "Ljava/lang/Object;")
+                .checkCast(ClassBuilder.internalName(sizes.getReturnType()))
+                .returnValue(sizes.getReturnType());
 
         // public Object value(boolean editing) { return TEXT.apply(this, Boolean.valueOf(editing)); }
-        MethodVisitor valueGetter = writer.visitMethod(Opcodes.ACC_PUBLIC, value.getName(), Type.getMethodDescriptor(value), null, null);
-        valueGetter.visitCode();
-        valueGetter.visitFieldInsn(Opcodes.GETSTATIC, name, TEXT, "Ljava/util/function/BiFunction;");
-        valueGetter.visitVarInsn(Opcodes.ALOAD, 0);
-        valueGetter.visitVarInsn(Opcodes.ILOAD, 1);
-        valueGetter.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
-        valueGetter.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply",
-                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
-        valueGetter.visitInsn(Opcodes.ARETURN);
-        valueGetter.visitMaxs(0, 0);
-        valueGetter.visitEnd();
+        builder.method(ClassBuilder.ACC_PUBLIC, value.getName(), ClassBuilder.descriptor(value))
+                .getStatic(name, TEXT, "Ljava/util/function/BiFunction;")
+                .loadThis()
+                .load(boolean.class, 1)
+                .invokeStatic("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;")
+                .invokeInterface("java/util/function/BiFunction", "apply",
+                        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;")
+                .returnValue(value.getReturnType());
 
         // float width(boolean background, T value, float contentWidth)
-        coveringSize(writer, base, width, 3);
+        coveringSize(builder, base, width, 3);
         // float height(boolean background, float contentHeight)
-        coveringSize(writer, base, height, 2);
+        coveringSize(builder, base, height, 2);
 
-        writer.visitEnd();
-        return writer.toByteArray();
+        return builder.toByteArray();
     }
 
     /**
      * {@code return Math.max(super.m(args), content + (background ? PADDING : 0));}, written without
      * branches ({@code background} is 0 or 1) so the method needs no stack map frames.
      */
-    private static void coveringSize(ClassWriter writer, String base, Method method, int contentSlot) {
-        String descriptor = Type.getMethodDescriptor(method);
-        MethodVisitor visitor = writer.visitMethod(Opcodes.ACC_PROTECTED, method.getName(), descriptor, null, null);
-        visitor.visitCode();
-        visitor.visitVarInsn(Opcodes.ALOAD, 0);
-        int slot = 1;
-        for (Class<?> parameter : method.getParameterTypes()) {
-            Type type = Type.getType(parameter);
-            visitor.visitVarInsn(type.getOpcode(Opcodes.ILOAD), slot);
-            slot += type.getSize();
-        }
-        visitor.visitMethodInsn(Opcodes.INVOKESPECIAL, base, method.getName(), descriptor, false);
-        visitor.visitVarInsn(Opcodes.FLOAD, contentSlot);
-        visitor.visitVarInsn(Opcodes.ILOAD, 1);
-        visitor.visitInsn(Opcodes.I2F);
-        visitor.visitLdcInsn(PADDING);
-        visitor.visitInsn(Opcodes.FMUL);
-        visitor.visitInsn(Opcodes.FADD);
-        visitor.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Math", "max", "(FF)F", false);
-        visitor.visitInsn(Opcodes.FRETURN);
-        visitor.visitMaxs(0, 0);
-        visitor.visitEnd();
+    private static void coveringSize(ClassBuilder builder, String base, Method method, int contentSlot) {
+        String descriptor = ClassBuilder.descriptor(method);
+        builder.method(ClassBuilder.ACC_PROTECTED, method.getName(), descriptor)
+                .loadThis()
+                .loadParameters(method.getParameterTypes())
+                .invokeSpecial(base, method.getName(), descriptor)
+                .load(float.class, contentSlot)
+                .load(boolean.class, 1)
+                .i2f()
+                .ldc(PADDING)
+                .fmul()
+                .fadd()
+                .invokeStatic("java/lang/Math", "max", "(FF)F")
+                .returnValue(float.class);
     }
 }

@@ -1,10 +1,5 @@
 package com.weave.lunarmods.internal.lunar;
 
-import net.weavemc.loader.impl.shaded.asm.ClassWriter;
-import net.weavemc.loader.impl.shaded.asm.MethodVisitor;
-import net.weavemc.loader.impl.shaded.asm.Opcodes;
-import net.weavemc.loader.impl.shaded.asm.Type;
-
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Method;
 import java.util.function.BiConsumer;
@@ -37,7 +32,7 @@ final class TileClassFactory {
     static Class<?> define(Class<?> base, Method metadata, Method display, Method optionsHook, String tileId,
                            boolean enabledByDefault, Function<Object, Object> metadataFactory,
                            Function<Object, Object> displayFactory, BiConsumer<Object, Object> options) throws Exception {
-        String baseName = Type.getInternalName(base);
+        String baseName = ClassBuilder.internalName(base);
         String packageName = baseName.substring(0, baseName.lastIndexOf('/') + 1);
         String name = packageName + "WeaveTile$" + tileId.replaceAll("[^A-Za-z0-9_]", "_");
         byte[] bytes = generate(name, baseName, metadata, display, optionsHook);
@@ -51,63 +46,45 @@ final class TileClassFactory {
     }
 
     private static byte[] generate(String name, String base, Method metadata, Method display, Method optionsHook) {
-        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, name, null, base, null);
-        int staticField = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC;
-        writer.visitField(staticField, ID, "Ljava/lang/String;", null, null).visitEnd();
-        writer.visitField(staticField, ENABLED_BY_DEFAULT, "Z", null, null).visitEnd();
-        writer.visitField(staticField, METADATA, "Ljava/util/function/Function;", null, null).visitEnd();
-        writer.visitField(staticField, DISPLAY, "Ljava/util/function/Function;", null, null).visitEnd();
-        writer.visitField(staticField, OPTIONS, "Ljava/util/function/BiConsumer;", null, null).visitEnd();
+        ClassBuilder builder = new ClassBuilder(name, base);
+        int staticField = ClassBuilder.ACC_PUBLIC | ClassBuilder.ACC_STATIC;
+        builder.field(staticField, ID, "Ljava/lang/String;");
+        builder.field(staticField, ENABLED_BY_DEFAULT, "Z");
+        builder.field(staticField, METADATA, "Ljava/util/function/Function;");
+        builder.field(staticField, DISPLAY, "Ljava/util/function/Function;");
+        builder.field(staticField, OPTIONS, "Ljava/util/function/BiConsumer;");
 
-        MethodVisitor init = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
-        init.visitCode();
-        init.visitVarInsn(Opcodes.ALOAD, 0);
-        init.visitFieldInsn(Opcodes.GETSTATIC, name, ENABLED_BY_DEFAULT, "Z");
-        init.visitMethodInsn(Opcodes.INVOKESPECIAL, base, "<init>", "(Z)V", false);
-        init.visitInsn(Opcodes.RETURN);
-        init.visitMaxs(0, 0);
-        init.visitEnd();
+        builder.method(ClassBuilder.ACC_PUBLIC, "<init>", "()V")
+                .loadThis()
+                .getStatic(name, ENABLED_BY_DEFAULT, "Z")
+                .invokeSpecial(base, "<init>", "(Z)V")
+                .returnValue(void.class);
 
-        MethodVisitor getId = writer.visitMethod(Opcodes.ACC_PUBLIC, "getId", "()Ljava/lang/String;", null, null);
-        getId.visitCode();
-        getId.visitFieldInsn(Opcodes.GETSTATIC, name, ID, "Ljava/lang/String;");
-        getId.visitInsn(Opcodes.ARETURN);
-        getId.visitMaxs(0, 0);
-        getId.visitEnd();
+        builder.method(ClassBuilder.ACC_PUBLIC, "getId", "()Ljava/lang/String;")
+                .getStatic(name, ID, "Ljava/lang/String;")
+                .returnValue(String.class);
 
-        functionGetter(writer, name, metadata, METADATA);
-        functionGetter(writer, name, display, DISPLAY);
+        functionGetter(builder, name, metadata, METADATA);
+        functionGetter(builder, name, display, DISPLAY);
 
-        MethodVisitor hook = writer.visitMethod(Opcodes.ACC_PUBLIC, optionsHook.getName(),
-                Type.getMethodDescriptor(optionsHook), null, null);
-        hook.visitCode();
-        hook.visitFieldInsn(Opcodes.GETSTATIC, name, OPTIONS, "Ljava/util/function/BiConsumer;");
-        hook.visitVarInsn(Opcodes.ALOAD, 0);
-        hook.visitVarInsn(Opcodes.ALOAD, 1);
-        hook.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept",
-                "(Ljava/lang/Object;Ljava/lang/Object;)V", true);
-        hook.visitInsn(Opcodes.RETURN);
-        hook.visitMaxs(0, 0);
-        hook.visitEnd();
+        builder.method(ClassBuilder.ACC_PUBLIC, optionsHook.getName(), ClassBuilder.descriptor(optionsHook))
+                .getStatic(name, OPTIONS, "Ljava/util/function/BiConsumer;")
+                .loadThis()
+                .load(Object.class, 1)
+                .invokeInterface("java/util/function/BiConsumer", "accept", "(Ljava/lang/Object;Ljava/lang/Object;)V")
+                .returnValue(void.class);
 
-        writer.visitEnd();
-        return writer.toByteArray();
+        return builder.toByteArray();
     }
 
     /** {@code public R method() { return (R) FIELD.apply(this); }} */
-    private static void functionGetter(ClassWriter writer, String owner, Method method, String field) {
-        MethodVisitor visitor = writer.visitMethod(Opcodes.ACC_PUBLIC, method.getName(),
-                Type.getMethodDescriptor(method), null, null);
-        visitor.visitCode();
-        visitor.visitFieldInsn(Opcodes.GETSTATIC, owner, field, "Ljava/util/function/Function;");
-        visitor.visitVarInsn(Opcodes.ALOAD, 0);
-        visitor.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply",
-                "(Ljava/lang/Object;)Ljava/lang/Object;", true);
-        visitor.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(method.getReturnType()));
-        visitor.visitInsn(Opcodes.ARETURN);
-        visitor.visitMaxs(0, 0);
-        visitor.visitEnd();
+    private static void functionGetter(ClassBuilder builder, String owner, Method method, String field) {
+        builder.method(ClassBuilder.ACC_PUBLIC, method.getName(), ClassBuilder.descriptor(method))
+                .getStatic(owner, field, "Ljava/util/function/Function;")
+                .loadThis()
+                .invokeInterface("java/util/function/Function", "apply", "(Ljava/lang/Object;)Ljava/lang/Object;")
+                .checkCast(ClassBuilder.internalName(method.getReturnType()))
+                .returnValue(method.getReturnType());
     }
 
     /**

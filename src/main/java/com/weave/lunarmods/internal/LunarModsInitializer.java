@@ -1,17 +1,22 @@
 package com.weave.lunarmods.internal;
 
+import com.weave.lunarmods.internal.lunar.LunarRuntime;
 import net.weavemc.api.ModInitializer;
-import net.weavemc.api.event.EventBus;
-import net.weavemc.api.event.ShutdownEvent;
-import net.weavemc.api.event.TickEvent;
 
-import java.util.function.Consumer;
+import java.lang.instrument.Instrumentation;
 
-/** Weave entry point: drives tile registration and saving from the client tick. */
+/**
+ * Weave entry point. Only {@link ModInitializer} is used from Weave, and both of its methods are
+ * implemented: some Weave builds compile them as abstract, with no default bodies.
+ */
 public final class LunarModsInitializer implements ModInitializer {
     @Override
+    public void preInit(Instrumentation instrumentation) {
+        LunarRuntime.install(instrumentation);
+    }
+
+    @Override
     public void init() {
-        EventBus.subscribe(TickEvent.Post.class, (Consumer<TickEvent.Post>) event -> Registry.tick());
-        EventBus.subscribe(ShutdownEvent.class, (Consumer<ShutdownEvent>) event -> Registry.shutdown());
+        Ticker.start();
     }
 }

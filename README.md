@@ -5,9 +5,12 @@ Lunar's mod menu. Each tile gets a custom icon, the "Original Authors" line, an 
 Lunar's toggle keybind and a settings panel built from Lunar's own controls. Settings are saved in
 the Weave folder.
 
-This is the `lunar-specific` branch. It requires the Lunar fork of Weave
-([adoringlol/Weave-Loader](https://github.com/adoringlol/Weave-Loader)), which provides the Lunar
-class lookup and the per-build cache this library uses. The `master` branch runs on stock Weave.
+A drop-in library jar for stock Weave 1.x: put `lunar-mod-api-1.0.0.jar` in
+`~/.weave/mods/1.8.9` next to the mods that use it. It only uses Weave's `ModInitializer`, so it
+does not need a patched loader. It only does anything on Lunar Client.
+
+The `lunar-specific` branch is the earlier version, built for the Lunar fork of Weave
+([adoringlol/Weave-Loader](https://github.com/adoringlol/Weave-Loader)).
 
 ## Declaring tiles: `lcmods.json`
 
@@ -49,6 +52,10 @@ mod's `init()` so they exist before Lunar builds its mod list.
 ```java
 public final class MyMod implements ModInitializer {
     @Override
+    public void preInit(Instrumentation instrumentation) {
+    }
+
+    @Override
     public void init() {
         LunarMod tile = LunarMods.mod("my_tile");
 
@@ -64,7 +71,9 @@ public final class MyMod implements ModInitializer {
 ```
 
 Add `"lunar-mod-api"` to `dependencies` in your `weave.mod.json`, and compile against
-`lunar-mod-api-1.0.0.jar`.
+`lunar-mod-api-1.0.0.jar`. Implement both `preInit` and `init`, even if `preInit` is empty: some
+Weave builds (such as 1.0.0-b.2) declare both methods without default bodies, and a mod that
+leaves one out fails to load there.
 
 Setting ids are the keys your values are saved under, so keep them stable between versions.
 
@@ -149,7 +158,7 @@ drawn.
 - **`onToggle`** runs whenever the tile is switched on or off. It also runs once with `true` when a
   tile starts enabled, so a mod can do its setup there.
 - **`Keybind.onPress`** runs only while the tile is enabled and no screen is open.
-- **Outside Lunar**, or with an older loader, tiles are not shown, and settings keep their
+- **Outside Lunar**, tiles are not shown, and settings keep their
   defaults (or whatever the mod `set()`).
 
 ## How Lunar is found
@@ -157,8 +166,8 @@ drawn.
 Lunar is obfuscated and renames its classes on every update, so the library finds its mod system
 by structure at runtime: the mod manager is identified by its `mods.json` file name, and each
 setting control by the UI type its builder reports. The result is cached per Lunar build in
-`~/.weave/cache/lunar/lunar-mod-api/<build>.properties`. The loader's cache checks Lunar's build
-data and a fingerprint of every class involved.
+`~/.weave/cache/lunar/lunar-mod-api/<build>.properties`. The cache is keyed by a hash of Lunar's
+build data and checks a fingerprint of every class involved.
 
 - **After a Lunar update**, the lookup runs once on a background thread (about 0.3 s) and tiles
   appear a moment after the title screen.
@@ -171,7 +180,13 @@ data and a fingerprint of every class involved.
 .\build.ps1
 ```
 
-Compiles with `javac --release 8` against the Weave loader, the 1.8.9 API jar and the mapped
-Minecraft jar of a Weave-Loader checkout next to this folder (`..\Weave-Loader`). The script
-writes `build\lunar-mod-api-1.0.0.jar` and copies it to `~/.weave/mods/1.8.9` when that folder
-exists.
+Compiles with `javac --release 8`. No Weave jar is needed: Weave's `ModInitializer` is compiled
+from a stub in `src/stubs` that is left out of the jar. The script needs:
+
+| Parameter | Default |
+|---|---|
+| `-MinecraftJar` | Minecraft 1.8.9 with MCP names, from a Weave-Loader checkout next to this folder (`..\Weave-Loader\api\v1_8\.gradle\weave\client-mcp-named.jar`) |
+| `-GsonJar`, `-GuavaJar`, `-LwjglJar` | Found in the Gradle cache; Guava falls back to Minecraft's own libraries |
+| `-ModsDir` | `~/.weave/mods/1.8.9`; the built jar is copied there when the folder exists |
+
+The script writes `build\lunar-mod-api-1.0.0.jar`.
