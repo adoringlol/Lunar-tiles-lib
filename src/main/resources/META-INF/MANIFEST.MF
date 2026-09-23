@@ -1,0 +1,4 @@
+Manifest-Version: 1.0
+Implementation-Title: Lunar Mod API for Weave
+Implementation-Version: 1.0.0
+

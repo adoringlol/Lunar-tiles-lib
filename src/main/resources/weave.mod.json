@@ -1,0 +1,10 @@
+{
+    "name": "Lunar Mod API",
+    "modId": "lunar-mod-api",
+    "entryPoints": [
+        "com.weave.lunarmods.internal.LunarModsInitializer"
+    ],
+    "namespace": "mcp-named",
+    "dependencies": [],
+    "compiledFor": "1.8.9"
+}
