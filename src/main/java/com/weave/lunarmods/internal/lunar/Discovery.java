@@ -2,6 +2,7 @@ package com.weave.lunarmods.internal.lunar;
 
 import com.weave.lunarmods.internal.Log;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.Method;
@@ -39,7 +40,7 @@ import java.util.function.Supplier;
 final class Discovery {
     static final String NAMESPACE = "lunar-mod-api";
     /** Bump when the set or meaning of cached keys changes. */
-    private static final String SCHEMA = "3";
+    private static final String SCHEMA = "5";
     private static final String CLIENT_PACKAGE = "com.moonsworth.lunar.client.";
     private static final String PROBE_ID = "lunarModApiProbe";
 
@@ -141,8 +142,10 @@ final class Discovery {
         found.put(Keys.BASE_DISPLAY, display);
         Method displayFactory = displayFactory(display.getReturnType());
         found.put(Keys.DISPLAY_FACTORY, displayFactory);
-        Class<?> resourceLocation = displayFactory.getParameterTypes()[0];
-        found.put(Keys.RL_CREATE, Members.accessible(resourceLocation.getMethod("create", String.class, String.class)));
+        Method createLocation = resourceLocationFactory(displayFactory.getParameterTypes()[0]);
+        if (createLocation != null) {
+            found.put(Keys.RL_CREATE, createLocation);
+        }
 
         findOptions(hook.getParameterTypes()[0], found);
     }
@@ -182,7 +185,8 @@ final class Discovery {
             if (!packageOf(holder).equals(featurePackage)) {
                 continue;
             }
-            for (Field field : holder.getDeclaredFields()) {
+            Field[] fields = declaredFields(holder);
+            for (Field field : fields) {
                 if (!Modifier.isStatic(field.getModifiers()) || field.getType() != key
                         || !(field.getGenericType() instanceof ParameterizedType)) {
                     continue;
@@ -221,7 +225,7 @@ final class Discovery {
             if (!packageOf(type).equals(hudPackage) || !hudType.isAssignableFrom(type)) {
                 continue;
             }
-            for (Method method : type.getDeclaredMethods()) {
+            for (Method method : declaredMethods(type)) {
                 Class<?>[] parameters = method.getParameterTypes();
                 if (!isStatic(method) || !Modifier.isPublic(method.getModifiers()) || !hudType.isAssignableFrom(method.getReturnType())
                         || parameters.length < 5 || parameters[0] != float.class || parameters[1] != float.class || parameters[2] != anchor) {
@@ -257,6 +261,27 @@ final class Discovery {
                 && Arrays.equals(m.getParameterTypes(), new Class<?>[]{int.class, int.class, int.class, int.class, int.class, int.class})));
 
         found.putAll(hud);
+    }
+
+    /**
+     * A package scan reflects over every loaded class in the package, and some reference types their
+     * loader cannot see (Lunar 2.22.43 has one naming Guava's {@code Cache}); reflecting on those
+     * throws. They are never what the scan looks for, so they are skipped instead of ending it.
+     */
+    private static Field[] declaredFields(Class<?> type) {
+        try {
+            return type.getDeclaredFields();
+        } catch (LinkageError unresolvable) {
+            return new Field[0];
+        }
+    }
+
+    private static Method[] declaredMethods(Class<?> type) {
+        try {
+            return type.getDeclaredMethods();
+        } catch (LinkageError unresolvable) {
+            return new Method[0];
+        }
     }
 
     /** Trait keys only carry an id: {@code getId()} is their one public method besides Object's. */
@@ -427,6 +452,53 @@ final class Discovery {
         Class<?> category = ((Method) found.get(Keys.META_CATEGORIES)).getParameterTypes()[0].getComponentType();
         found.put(Keys.CATEGORY_VALUES, single(category, "category list", m -> isStatic(m)
                 && m.getName().equals("values") && m.getParameterCount() == 0));
+    }
+
+    /**
+     * Lunar's {@code (domain, path)} resource-location factory, or {@code null}. It is only a
+     * fallback (on 1.8 the game's own resource locations already are Lunar's type), so failing to
+     * find it never stops the scan.
+     *
+     * <p>Older builds kept its name, {@code create}. Newer ones obfuscate it and add a look-alike
+     * that takes {@code (path, domain)}, so each static {@code (String, String)} factory is called
+     * with a probe and the one that returns the domain and path it was given is kept.
+     */
+    private static Method resourceLocationFactory(final Class<?> location) {
+        try {
+            return Members.accessible(location.getMethod("create", String.class, String.class));
+        } catch (NoSuchMethodException renamed) {
+            // Probe below.
+        }
+        Method domain = null;
+        Method path = null;
+        for (Method method : location.getMethods()) {
+            if (!isStatic(method) && method.getParameterCount() == 0 && method.getReturnType() == String.class) {
+                if (method.getName().endsWith("getDomain") || method.getName().endsWith("getNamespace")) {
+                    domain = method;
+                } else if (method.getName().endsWith("getPath")) {
+                    path = method;
+                }
+            }
+        }
+        if (domain == null || path == null) {
+            return null;
+        }
+        Method match = null;
+        for (Method candidate : all(location, m -> isStatic(m) && m.getReturnType() == location
+                && Arrays.equals(m.getParameterTypes(), new Class<?>[]{String.class, String.class}))) {
+            try {
+                Object probe = candidate.invoke(null, "lunarmodapi", "probe/path");
+                if (probe != null && "lunarmodapi".equals(domain.invoke(probe)) && "probe/path".equals(path.invoke(probe))) {
+                    if (match != null) {
+                        return null;
+                    }
+                    match = candidate;
+                }
+            } catch (Exception | LinkageError unusable) {
+                // Not the factory, or not callable outside the game (offline tests).
+            }
+        }
+        return match;
     }
 
     private static Method displayFactory(Class<?> display) {
@@ -640,18 +712,48 @@ final class Discovery {
             press = optional(type, m -> !isStatic(m) && Modifier.isPublic(m.getModifiers())
                     && Arrays.equals(m.getParameterTypes(), new Class<?>[]{Runnable.class}));
         }
-        Method comboKey = optional(combo, m -> !isStatic(m) && m.getParameterCount() == 0 && m.getReturnType() == key);
+        Constructor<?> comboConstructor = combo.getConstructor(boolean.class, boolean.class, boolean.class, key);
+        Method comboKey = comboKey(combo, key, comboConstructor);
         if (comboKey == null) {
             return null;
         }
         Candidate candidate = with(Kind.KEYBIND, factory, Keys.DEFAULT, Members.accessible(defaultKey));
         candidate.members.put(Keys.KEY_DOWN, Members.accessible(publicMethod(option, "isKeyDown")));
-        candidate.members.put(Keys.COMBO, Members.accessible(combo.getConstructor(boolean.class, boolean.class, boolean.class, key)));
+        candidate.members.put(Keys.COMBO, Members.accessible(comboConstructor));
         candidate.members.put(Keys.COMBO_KEY, comboKey);
         if (press != null) {
             candidate.members.put(Keys.PRESS, press);
         }
         return candidate;
+    }
+
+    /**
+     * The combo's main-key getter, or {@code null}. Older builds had one key getter. Lunar 2.23.0
+     * added a second key to combos (none unless set, read by a look-alike getter), so a combo is
+     * built with a probe key and the getter that returns it is kept.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static Method comboKey(Class<?> combo, Class<?> key, Constructor<?> constructor) {
+        List<Method> getters = all(combo, m -> !isStatic(m) && m.getParameterCount() == 0 && m.getReturnType() == key);
+        if (getters.size() <= 1) {
+            return getters.isEmpty() ? null : getters.get(0);
+        }
+        Method match = null;
+        try {
+            Object probeKey = Enum.valueOf((Class) key, "KEY_K");
+            Object probe = constructor.newInstance(false, false, false, probeKey);
+            for (Method getter : getters) {
+                if (getter.invoke(probe) == probeKey) {
+                    if (match != null) {
+                        return null;
+                    }
+                    match = getter;
+                }
+            }
+        } catch (Exception | LinkageError unusable) {
+            return null;
+        }
+        return match;
     }
 
     private static Candidate with(Kind kind, Method factory, String key, Object member) {

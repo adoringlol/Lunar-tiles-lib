@@ -29,6 +29,12 @@ function Resolve-CachedJar([string] $group, [string] $artifact, [string] $patter
 # Only APIs that already exist in Minecraft 1.8.9's Gson 2.2.4 are used; any Gson 2.x compiles them.
 if (-not $GsonJar) { $GsonJar = Resolve-CachedJar 'com.google.code.gson' 'gson' 'gson-2.*.jar' }
 if (-not $LwjglJar) { $LwjglJar = Resolve-CachedJar 'org.lwjgl.lwjgl' 'lwjgl' 'lwjgl-2.9.*.jar' }
+if (-not $LwjglJar) {
+    # Minecraft 1.8.9 ships LWJGL 2.9.4; the launcher keeps it after Gradle's cache is cleaned.
+    $LwjglJar = Get-ChildItem -LiteralPath (Join-Path $env:APPDATA '.minecraft\libraries\org\lwjgl\lwjgl\lwjgl') -Recurse -Filter 'lwjgl-2.9.*.jar' -File -ErrorAction SilentlyContinue |
+        Sort-Object Name |
+        Select-Object -Last 1 -ExpandProperty FullName
+}
 # Only needed for the return type of Minecraft.addScheduledTask; any version has it.
 if (-not $GuavaJar) { $GuavaJar = Resolve-CachedJar 'com.google.guava' 'guava' 'guava-*.jar' }
 if (-not $GuavaJar) {
@@ -45,6 +51,9 @@ foreach ($dependency in @($MinecraftJar, $GsonJar, $GuavaJar, $LwjglJar)) {
     }
 }
 
+# JDK 9+ checks Java 8 API use with --release; JDK 8's javac has no such flag and targets 8 already.
+$targetFlags = if ((& javac -version 2>&1 | Out-String) -match 'javac 1\.8') { @('-source', '8', '-target', '8') } else { @('--release', '8') }
+
 foreach ($directory in @($stubClasses, $classes)) {
     Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
@@ -53,7 +62,7 @@ foreach ($directory in @($stubClasses, $classes)) {
 # Weave's ModInitializer is compiled from a stub and left out of the jar; Weave provides it at runtime.
 $stubs = Get-ChildItem -LiteralPath (Join-Path $root 'src\stubs\java') -Recurse -Filter '*.java' |
     ForEach-Object { $_.FullName }
-javac --release 8 -encoding UTF-8 -proc:none -Xlint:-options -d $stubClasses $stubs
+javac @targetFlags -encoding UTF-8 -proc:none -Xlint:-options -d $stubClasses $stubs
 if ($LASTEXITCODE -ne 0) {
     throw "javac (stubs) failed with exit code $LASTEXITCODE"
 }
@@ -62,7 +71,7 @@ $sources = Get-ChildItem -LiteralPath (Join-Path $root 'src\main\java') -Recurse
     ForEach-Object { $_.FullName }
 $classpath = "$stubClasses;$MinecraftJar;$GsonJar;$GuavaJar;$LwjglJar"
 
-javac --release 8 -encoding UTF-8 -proc:none -Xlint:-options -cp $classpath -d $classes $sources
+javac @targetFlags -encoding UTF-8 -proc:none -Xlint:-options -cp $classpath -d $classes $sources
 if ($LASTEXITCODE -ne 0) {
     throw "javac failed with exit code $LASTEXITCODE"
 }

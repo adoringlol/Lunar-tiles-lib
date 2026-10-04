@@ -88,11 +88,18 @@ public final class LunarBridge {
         }
     }
 
-    /** Scans Lunar (slow path, run off the main thread) and caches the result for this build. */
+    /**
+     * Scans Lunar (slow path, run off the main thread) and caches the result for this build. A
+     * result without the HUD editor is not cached: the cache is only renewed when Lunar changes, so
+     * caching it would keep HUD elements hidden even after a library update that finds the editor.
+     * The scan then simply runs again next launch.
+     */
     public static LunarBridge scan(ClassLoader loader) throws Exception {
         Map<String, Object> members = Discovery.scan();
         LunarBridge bridge = new LunarBridge(members);
-        Discovery.store(loader, members);
+        if (bridge.supportsHud()) {
+            Discovery.store(loader, members);
+        }
         return bridge;
     }
 
@@ -174,7 +181,11 @@ public final class LunarBridge {
         return config;
     }
 
+    /** Lunar's own resource-location factory; only needed when the game's class is not Lunar's type. */
     public Object resourceLocation(String domain, String path) throws Exception {
+        if (!members.containsKey(Keys.RL_CREATE)) {
+            throw new IllegalStateException("Lunar's resource location factory was not found in this Lunar version");
+        }
         return method(Keys.RL_CREATE).invoke(null, domain, path);
     }
 
