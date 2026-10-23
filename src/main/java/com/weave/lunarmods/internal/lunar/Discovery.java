@@ -129,7 +129,8 @@ final class Discovery {
         found.put(Keys.BASE_LOAD, Members.accessible(base.getDeclaredMethod("load", json)));
 
         Method hook = single(feature, "options hook", m -> !isStatic(m) && m.getReturnType() == void.class
-                && m.getParameterCount() == 1 && !m.getParameterTypes()[0].isPrimitive() && !m.isSynthetic());
+                && m.getParameterCount() == 1 && !m.getParameterTypes()[0].isPrimitive() && !m.isSynthetic()
+                && isOptionRegistrar(m.getParameterTypes()[0]));
         found.put(Keys.FEATURE_HOOK, hook);
 
         Method metadata = single(base, "metadata getter", m -> !isStatic(m) && m.getParameterCount() == 0
@@ -514,13 +515,45 @@ final class Discovery {
 
     // ---- options ------------------------------------------------------------------------------
 
-    private static void findOptions(Class<?> registrar, Map<String, Object> found) throws Exception {
+    /** The registrar's add methods: public, one array-of-interface parameter and a result, up its superclasses. */
+    private static List<Method> registrarAdders(Class<?> registrar) {
         List<Method> adders = new ArrayList<Method>();
         for (Class<?> type = registrar; type != null && type != Object.class; type = type.getSuperclass()) {
             adders.addAll(all(type, m -> !isStatic(m) && Modifier.isPublic(m.getModifiers())
                     && m.getParameterCount() == 1 && m.getParameterTypes()[0].isArray()
                     && m.getParameterTypes()[0].getComponentType().isInterface() && m.getReturnType() != void.class));
         }
+        return adders;
+    }
+
+    /**
+     * Whether {@code type} is Lunar's option registrar: it has an add method and keeps its rows in a
+     * {@link LinkedList}. Newer builds gave mods a second one-parameter hook (it takes the HUD editor), so
+     * the options hook can no longer be told apart by its signature alone.
+     */
+    private static boolean isOptionRegistrar(Class<?> type) {
+        if (type.isPrimitive() || type.isArray()) {
+            return false;
+        }
+        try {
+            if (registrarAdders(type).isEmpty()) {
+                return false;
+            }
+        } catch (LinkageError unresolvable) {
+            return false;
+        }
+        for (Class<?> current = type; current != null && current != Object.class; current = current.getSuperclass()) {
+            for (Field field : declaredFields(current)) {
+                if (!Modifier.isStatic(field.getModifiers()) && field.getType() == LinkedList.class) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void findOptions(Class<?> registrar, Map<String, Object> found) throws Exception {
+        List<Method> adders = registrarAdders(registrar);
         if (adders.isEmpty()) {
             throw new IllegalStateException("Lunar's option registrar has no add method");
         }
