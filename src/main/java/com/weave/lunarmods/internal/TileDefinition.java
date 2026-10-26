@@ -22,8 +22,14 @@ public final class TileDefinition {
 
     TileDefinition(String id, String name, String description, List<String> creators, List<String> categories,
                    boolean enabledByDefault, URL icon, URL source) {
+        this(id, "WEAVE_" + id.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]+", "_"), name, description, creators,
+                categories, enabledByDefault, icon, source);
+    }
+
+    private TileDefinition(String id, String lunarId, String name, String description, List<String> creators,
+                           List<String> categories, boolean enabledByDefault, URL icon, URL source) {
         this.id = id;
-        this.lunarId = "WEAVE_" + id.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]+", "_");
+        this.lunarId = lunarId;
         this.name = name;
         this.description = description;
         this.creators = creators;
@@ -37,6 +43,15 @@ public final class TileDefinition {
     public static TileDefinition undeclared(String id) {
         return new TileDefinition(id, id, "", java.util.Collections.<String>emptyList(),
                 java.util.Collections.<String>emptyList(), true, null, null);
+    }
+
+    /**
+     * One of Lunar's own mods, addressed by the id Lunar gives it. Lunar owns its name, icon and
+     * on/off switch, so only the id is known here; it counts as off until Lunar's mod is found.
+     */
+    public static TileDefinition lunar(String lunarId) {
+        return new TileDefinition(lunarId, lunarId, lunarId, "", java.util.Collections.<String>emptyList(),
+                java.util.Collections.<String>emptyList(), false, null, null);
     }
 
     static String key(String id) {

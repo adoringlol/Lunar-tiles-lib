@@ -1,5 +1,8 @@
 package com.weave.lunarmods;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.weave.lunarmods.internal.InjectionHandle;
 import com.weave.lunarmods.internal.Log;
 import com.weave.lunarmods.internal.Registry;
 import com.weave.lunarmods.internal.TileDefinition;
@@ -18,15 +21,20 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 /**
- * A tile in Lunar's mod menu, declared in your jar's {@code lcmods.json} and claimed with
- * {@link LunarMods#mod(String)}.
+ * A tile in Lunar's mod menu: either your own, declared in your jar's {@code lcmods.json} and claimed
+ * with {@link LunarMods#mod(String)}, or one of Lunar's own mods, from {@link LunarMods#lunarMod(String)}.
  *
  * <p>Add settings from your mod's {@code init()}; they appear in the tile's settings panel in the
- * order they were added, below Lunar's own enable switch, and above the toggle keybind Lunar adds to
- * every mod. All values are saved in the Weave folder.
+ * order they were added. On your own tiles they sit below Lunar's enable switch and above the toggle
+ * keybind Lunar adds to every mod; on Lunar's own mods they follow that mod's own settings. All
+ * values are saved in the Weave folder.
  */
 public final class LunarMod {
+    /** Prefix of the option ids added to Lunar's own mods, so they never collide with that mod's own. */
+    private static final String ADDED_OPTION_PREFIX = "weave_";
+
     private final TileDefinition tile;
+    private final boolean lunarOwned;
     private final List<Element<?>> elements = new CopyOnWriteArrayList<Element<?>>();
     private final Set<String> ids = new HashSet<String>();
     private final List<Consumer<Boolean>> toggleListeners = new CopyOnWriteArrayList<Consumer<Boolean>>();
@@ -38,32 +46,64 @@ public final class LunarMod {
     private int headers;
 
     LunarMod(TileDefinition tile, boolean declared) {
+        this(tile, declared, false);
+    }
+
+    private LunarMod(TileDefinition tile, boolean declared, boolean lunarOwned) {
         this.tile = tile;
+        this.lunarOwned = lunarOwned;
         this.lastEnabled = tile.enabledByDefault;
-        if (declared) {
+        if (lunarOwned) {
+            Registry.inject(new Injection());
+        } else if (declared) {
             Registry.claim(new Handle());
         } else {
             Registry.runWithoutLunar(new Handle());
         }
     }
 
-    /** The id from {@code lcmods.json}. */
+    /** One of Lunar's own mods; see {@link LunarMods#lunarMod(String)}. */
+    static LunarMod lunarOwned(String lunarId) {
+        return new LunarMod(TileDefinition.lunar(lunarId), true, true);
+    }
+
+    /** The id from {@code lcmods.json}, or for one of Lunar's own mods the id it was asked for by. */
     public String id() {
         return tile.id;
     }
 
-    /** The tile's display name from {@code lcmods.json}. */
+    /** The tile's display name from {@code lcmods.json}; for one of Lunar's own mods, its id. */
     public String name() {
         return tile.name;
     }
 
+    /** Whether this is one of Lunar's own mods rather than a tile declared by a Weave mod. */
+    public boolean isLunarMod() {
+        return lunarOwned;
+    }
+
+    /**
+     * Lunar's object for this mod, or {@code null} until the tile is in Lunar's mod list (and always
+     * outside Lunar). Its classes are obfuscated and renamed every Lunar update, so this is only for
+     * mods that read Lunar's state reflectively, such as one extending a Lunar mod's behavior.
+     */
+    public Object lunarObject() {
+        return feature;
+    }
+
     /**
      * Whether the player has the tile switched on. Before Lunar has registered the tile (or outside
-     * Lunar) this is the manifest's {@code enabledByDefault}.
+     * Lunar) this is the manifest's {@code enabledByDefault}; one of Lunar's own mods counts as off
+     * until it is found.
      */
     public boolean isEnabled() {
         Object lunarFeature = feature;
         return lunarFeature != null ? bridge.isEnabled(lunarFeature) : tile.enabledByDefault;
+    }
+
+    /** The id the Lunar option of a setting is created with. */
+    String optionId(String id) {
+        return lunarOwned ? ADDED_OPTION_PREFIX + id : id;
     }
 
     /**
@@ -178,6 +218,10 @@ public final class LunarMod {
     }
 
     private synchronized Hud setHud(Hud created) {
+        if (lunarOwned) {
+            throw new UnsupportedOperationException("'" + tile.id + "' is one of Lunar's own mods, which already has "
+                    + "its own HUD element (or none); draw anything extra from your mod instead");
+        }
         if (hud != null) {
             throw new IllegalStateException("Tile '" + tile.id + "' already has a HUD element; a tile has one, shown while the tile is on");
         }
@@ -277,6 +321,78 @@ public final class LunarMod {
                     element.poll();
                 } catch (RuntimeException exception) {
                     Log.error("Setting '" + element.id + "' of tile '" + tile.id + "' failed", exception);
+                }
+            }
+            pollToggle();
+        }
+
+        @Override
+        public void standalone() {
+        }
+    }
+
+    /**
+     * Bridges the registry to settings added to one of Lunar's own mods. Lunar saves that mod's
+     * config in its profile and does not know the added options, so their values are saved by the
+     * library, keyed by setting id.
+     */
+    private final class Injection implements InjectionHandle {
+        private List<Object> options;
+
+        @Override
+        public TileDefinition definition() {
+            return tile;
+        }
+
+        @Override
+        public synchronized List<Object> options(LunarBridge lunar) {
+            if (options == null) {
+                List<Object> built = new ArrayList<Object>();
+                for (Element<?> element : elements) {
+                    Object option = element.build(lunar);
+                    if (option != null) {
+                        built.add(option);
+                    }
+                }
+                options = built;
+            }
+            return options;
+        }
+
+        @Override
+        public void attached(LunarBridge lunar, Object lunarFeature, JsonObject saved) {
+            bridge = lunar;
+            feature = lunarFeature;
+            if (saved == null) {
+                return;
+            }
+            for (Element<?> element : elements) {
+                JsonElement value = saved.get(element.id);
+                if (value != null) {
+                    element.load(value);
+                }
+            }
+        }
+
+        @Override
+        public JsonObject save() {
+            JsonObject values = new JsonObject();
+            for (Element<?> element : elements) {
+                JsonElement value = element.save();
+                if (value != null) {
+                    values.add(element.id, value);
+                }
+            }
+            return values;
+        }
+
+        @Override
+        public void tick() {
+            for (Element<?> element : elements) {
+                try {
+                    element.poll();
+                } catch (RuntimeException exception) {
+                    Log.error("Setting '" + element.id + "' added to Lunar's mod '" + tile.id + "' failed", exception);
                 }
             }
             pollToggle();

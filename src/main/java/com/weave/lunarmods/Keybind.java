@@ -66,6 +66,11 @@ public final class Keybind extends Setting<Integer, Keybind> {
     @Override
     void describe(OptionSpec spec) {
         spec.defaultValue = defaultValue();
+        if (mod.isLunarMod()) {
+            // Lunar wires press callbacks when it builds a mod, before these options are added, so
+            // presses on Lunar's own mods are detected in poll().
+            return;
+        }
         spec.action = new Runnable() {
             @Override
             public void run() {
@@ -79,10 +84,11 @@ public final class Keybind extends Setting<Integer, Keybind> {
     @Override
     void poll() {
         super.poll();
-        if (option != null && bridge.hasPressListener()) {
+        if (option != null && bridge.hasPressListener() && !mod.isLunarMod()) {
             return;
         }
-        // Fallback when Lunar exposes no press callback (or outside Lunar): detect the press here.
+        // Fallback when Lunar delivers no press (no press callback, one of Lunar's own mods, or
+        // outside Lunar): detect the press here.
         boolean down = Minecraft.getMinecraft().currentScreen == null && isDown();
         if (down && !wasDown) {
             firePress();

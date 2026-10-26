@@ -11,14 +11,19 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
@@ -42,6 +47,8 @@ public final class LunarBridge {
     private final Class<?> categoryType;
     private final Method isEnabled;
     private final Class<?> keyType;
+    /** The live settings-list getter per options trait class; see {@link #optionRows}. */
+    private final Map<Class<?>, Method> liveRows = new HashMap<Class<?>, Method>();
     /** Which of the two metadata text setters is the name; probed on first use. */
     private Boolean nameIsTextA;
 
@@ -90,14 +97,14 @@ public final class LunarBridge {
 
     /**
      * Scans Lunar (slow path, run off the main thread) and caches the result for this build. A
-     * result without the HUD editor is not cached: the cache is only renewed when Lunar changes, so
-     * caching it would keep HUD elements hidden even after a library update that finds the editor.
-     * The scan then simply runs again next launch.
+     * result without the HUD editor or the settings lists of Lunar's own mods is not cached: the
+     * cache is only renewed when Lunar changes, so caching it would keep those features off even
+     * after a library update that finds them. The scan then simply runs again next launch.
      */
     public static LunarBridge scan(ClassLoader loader) throws Exception {
         Map<String, Object> members = Discovery.scan();
         LunarBridge bridge = new LunarBridge(members);
-        if (bridge.supportsHud()) {
+        if (bridge.supportsHud() && bridge.supportsInjection()) {
             Discovery.store(loader, members);
         }
         return bridge;
@@ -266,6 +273,86 @@ public final class LunarBridge {
         } catch (Exception failed) {
             throw new IllegalStateException("Could not build the icon for tile " + tile.id, unwrap(failed));
         }
+    }
+
+    // ---- Lunar's own mods ---------------------------------------------------------------------
+
+    /** Whether settings can be added to Lunar's own mods in this Lunar build. */
+    public boolean supportsInjection() {
+        return members.containsKey(Keys.OPTIONS_TRAIT);
+    }
+
+    /**
+     * The registered Lunar mod with this id, or {@code null}. Case, spaces, dashes and underscores
+     * are ignored, so {@code "media_player"} finds Lunar's {@code MEDIA_PLAYER}.
+     */
+    public Object findFeature(String id) throws Exception {
+        String wanted = comparableId(id);
+        Method getId = ((Class<?>) members.get(Keys.FEATURE)).getMethod("getId");
+        for (Object feature : new ArrayList<Object>((Collection<?>) field(Keys.MANAGER_ITEMS).get(manager))) {
+            Object featureId = getId.invoke(feature);
+            if (featureId != null && comparableId(featureId.toString()).equals(wanted)) {
+                return feature;
+            }
+        }
+        return null;
+    }
+
+    private static String comparableId(String id) {
+        return id.replaceAll("[\\s_-]+", "").toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * Appends the options a Lunar mod's settings panel does not list yet, after its own rows, and
+     * returns how many were added. Lunar rebuilds the list when it reloads a mod's options, which
+     * drops added rows, so callers repeat this now and then; rows already listed are left alone.
+     */
+    public int injectOptions(Object feature, List<Object> options) throws Exception {
+        Set<Object> rows = optionRows(feature);
+        int added = 0;
+        for (Object option : options) {
+            if (!rows.contains(option)) {
+                rows.add(option);
+                added++;
+            }
+        }
+        return added;
+    }
+
+    /**
+     * The options trait has several getters that return a set of options; only the live list
+     * returns the same set on every call, the others copy and flatten it. The getter is looked up
+     * once per trait class.
+     */
+    @SuppressWarnings("unchecked")
+    private Set<Object> optionRows(Object feature) throws Exception {
+        Object trait = ((Optional<?>) method(Keys.TRAIT_FIND).invoke(feature, field(Keys.OPTIONS_TRAIT).get(null))).orElse(null);
+        if (trait == null) {
+            throw new IllegalStateException("This Lunar mod has no settings list");
+        }
+        Method live = liveRows.get(trait.getClass());
+        if (live == null) {
+            // The trait's interface is the type argument of its key.
+            Class<?> traitType = (Class<?>) ((ParameterizedType) field(Keys.OPTIONS_TRAIT).getGenericType()).getActualTypeArguments()[0];
+            for (Method candidate : traitType.getMethods()) {
+                if (Modifier.isStatic(candidate.getModifiers()) || candidate.getParameterCount() != 0
+                        || candidate.getReturnType() != Set.class) {
+                    continue;
+                }
+                Object first = candidate.invoke(trait);
+                if (first != null && first == candidate.invoke(trait)) {
+                    if (live != null) {
+                        throw new IllegalStateException("Several live settings lists on " + traitType.getName());
+                    }
+                    live = candidate;
+                }
+            }
+            if (live == null) {
+                throw new IllegalStateException("The live settings list was not found on " + traitType.getName());
+            }
+            liveRows.put(trait.getClass(), live);
+        }
+        return (Set<Object>) live.invoke(trait);
     }
 
     // ---- HUD elements -------------------------------------------------------------------------

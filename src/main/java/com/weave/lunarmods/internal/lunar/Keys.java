@@ -48,6 +48,10 @@ final class Keys {
     static final String HUD_TEXT_HEIGHT = "hud.text.height";
     static final String HUD_SIZE = "hud.size";
 
+    // Settings of Lunar's own mods; all optional, present only when both were found.
+    static final String TRAIT_FIND = "trait.find";
+    static final String OPTIONS_TRAIT = "options.trait";
+
     // Per-kind members, stored as "kind.<KIND>.<member>".
     static final String FACTORY = "factory";
     static final String DEFAULT = "default";

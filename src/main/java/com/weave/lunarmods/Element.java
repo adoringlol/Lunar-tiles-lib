@@ -1,5 +1,6 @@
 package com.weave.lunarmods;
 
+import com.google.gson.JsonElement;
 import com.weave.lunarmods.internal.Log;
 import com.weave.lunarmods.internal.lunar.Kind;
 import com.weave.lunarmods.internal.lunar.LunarBridge;
@@ -67,7 +68,7 @@ public abstract class Element<S extends Element<S>> {
             Log.warn("Setting '" + id + "' of tile '" + mod.id() + "' is not shown: this Lunar version has no " + kind() + " control.");
             return null;
         }
-        OptionSpec spec = new OptionSpec(kind(), id);
+        OptionSpec spec = new OptionSpec(kind(), mod.optionId(id));
         final String label = name;
         spec.name = new Supplier<String>() {
             @Override
@@ -109,5 +110,14 @@ public abstract class Element<S extends Element<S>> {
 
     /** Called every client tick while the tile is registered. */
     void poll() {
+    }
+
+    /** The value for the library's settings file, or {@code null} for rows without one. */
+    JsonElement save() {
+        return null;
+    }
+
+    /** Restores a value written by {@link #save()}. */
+    void load(JsonElement value) {
     }
 }

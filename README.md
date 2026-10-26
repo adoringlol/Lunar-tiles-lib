@@ -2,8 +2,21 @@
 
 A Weave library mod (1.8.9, Lunar Client) that lets other Weave mods add their own tiles to
 Lunar's mod menu. Each tile gets a custom icon, the "Original Authors" line, an on/off switch,
-Lunar's toggle keybind and a settings panel built from Lunar's own controls. Settings are saved in
-the Weave folder.
+Lunar's toggle keybind and a settings panel built from Lunar's own controls. Mods can also add
+settings to Lunar's built-in mods, such as Media Player. Settings are saved in the Weave folder.
+
+```java
+// A tile of your own (declared in lcmods.json):
+LunarMod tile = LunarMods.mod("my_tile");
+tile.toggle("sound", "Play Sound", true);
+
+// Settings added to one of Lunar's own mods (no lcmods.json needed):
+LunarMod mediaPlayer = LunarMods.lunarMod("MEDIA_PLAYER");
+mediaPlayer.toggle("viewer_show", "Show Viewer", true);
+```
+
+See [Adding settings to Lunar's own mods](#adding-settings-to-lunars-own-mods) for a complete
+injection example.
 
 A drop-in library jar for stock Weave 1.x: put `lunar-mod-api-1.0.0.jar` in
 `~/.weave/mods/1.8.9` next to the mods that use it. It only uses Weave's `ModInitializer`, so it
@@ -146,6 +159,127 @@ element. `editing` is true while the HUD editor is open. `position(anchor, x, y)
 starting spot before the player moves it. HUD elements need Lunar; outside Lunar they are not
 drawn.
 
+## Adding settings to Lunar's own mods
+
+A mod can also add settings to one of Lunar's built-in mods instead of declaring a tile of its
+own. Ask for Lunar's mod by the id Lunar gives it. This needs no `lcmods.json` entry.
+
+### Example: a "Viewer" section in Media Player
+
+This complete mod adds a "Viewer" section to the end of Lunar's Media Player settings, with an
+on/off switch, a size slider and a hotkey that flips the switch. It draws a box on the HUD while
+Media Player and the switch are both on.
+
+`src/main/java/com/example/viewer/ViewerMod.java`:
+
+```java
+package com.example.viewer;
+
+import com.weave.lunarmods.Keybind;
+import com.weave.lunarmods.LunarMod;
+import com.weave.lunarmods.LunarMods;
+import com.weave.lunarmods.Slider;
+import com.weave.lunarmods.Toggle;
+import net.minecraft.client.gui.Gui;
+import net.weavemc.api.ModInitializer;
+import net.weavemc.api.event.EventBus;
+import net.weavemc.api.event.RenderGameOverlayEvent;
+import org.lwjgl.input.Keyboard;
+
+import java.lang.instrument.Instrumentation;
+import java.util.function.Consumer;
+
+public final class ViewerMod implements ModInitializer {
+    private Toggle show;
+    private Slider<Integer> width;
+
+    @Override
+    public void preInit(Instrumentation instrumentation) {
+    }
+
+    @Override
+    public void init() {
+        // Lunar's id for Media Player; "media_player" or "Media Player" work too.
+        LunarMod mediaPlayer = LunarMods.lunarMod("MEDIA_PLAYER");
+
+        // These rows appear after Media Player's own settings, in this order.
+        mediaPlayer.header("Viewer");
+        show = mediaPlayer.toggle("viewer_show", "Show Viewer", true);
+        width = mediaPlayer.slider("viewer_width", "Width", 160, 80, 480).visibleWhen(show::get);
+        Keybind hotkey = mediaPlayer.keybind("viewer_toggle", "Toggle Viewer", Keyboard.KEY_M);
+
+        // Only runs while Media Player is on and no screen is open.
+        hotkey.onPress(() -> show.set(!show.get()));
+
+        // Follows Media Player's own on/off switch.
+        mediaPlayer.onToggle(enabled -> System.out.println("Media Player is now " + (enabled ? "on" : "off")));
+
+        EventBus.subscribe(RenderGameOverlayEvent.Post.class, (Consumer<RenderGameOverlayEvent.Post>) event -> {
+            if (mediaPlayer.isEnabled() && show.get()) {
+                int w = width.get();
+                Gui.drawRect(10, 10, 10 + w, 10 + w * 9 / 16, 0x80000000);
+            }
+        });
+    }
+}
+```
+
+`src/main/resources/weave.mod.json` depends on this library, so it loads first:
+
+```json
+{
+    "name": "Viewer",
+    "modId": "viewer",
+    "entryPoints": ["com.example.viewer.ViewerMod"],
+    "namespace": "mcp-named",
+    "dependencies": ["lunar-mod-api"],
+    "compiledFor": "1.8.9"
+}
+```
+
+Compile against `lunar-mod-api-1.0.0.jar`, and put both jars in `~/.weave/mods/1.8.9`. In
+game, open Media Player's settings: the "Viewer" section is at the bottom. The values are saved
+in `settings.json` under `"lunar:MEDIA_PLAYER"`:
+
+```json
+"lunar:MEDIA_PLAYER": { "viewer_show": true, "viewer_width": 160, "viewer_toggle": 50 }
+```
+
+### How added settings behave
+
+Lunar's ids are its own internal names, in capitals with underscores (`MEDIA_PLAYER`). Case,
+spaces, dashes and underscores are ignored when matching, so `"media_player"` and
+`"Media Player"` find the same mod. Every call with the same id returns the same object.
+
+It is the same `LunarMod` type as a tile, with these differences:
+
+- **Where the rows go.** The added settings are listed at the end of that mod's settings panel,
+  after Lunar's own rows, in the order they were added. Add them from `init()`, like tile
+  settings.
+- **Every setting type works** (toggle, slider, color, text, dropdown, choice, keybind, button,
+  header), including `visibleWhen`, `onChange`, `get` and `set`.
+- **On/off is Lunar's.** `isEnabled()` and `onToggle` follow the Lunar mod's own switch, and
+  `Keybind.onPress` only runs while that mod is on. Before Lunar's mod is found, and outside
+  Lunar, it counts as off.
+- **No HUD element.** Lunar's mods keep their own HUD element (or have none), so `hud()` and
+  `textHud()` throw `UnsupportedOperationException`. Draw anything extra from your mod, for
+  example from Weave's `RenderGameOverlayEvent`.
+- **Storage.** Lunar saves its mods in its own profile and does not know the added settings, so
+  their values are saved by this library, in the same `settings.json` as tiles, under
+  `"lunar:<ID>"`. They are created in Lunar as `weave_<setting id>`, so they never collide with
+  the mod's own options.
+- **Key presses** of added keybinds are detected by the library each tick instead of by Lunar.
+  Lunar wires its press callbacks when it builds a mod, which is before these rows are added.
+- **Lunar's object.** `lunarObject()` returns Lunar's mod object once it is found, or `null`
+  before that. Its classes are obfuscated and renamed every Lunar update, so it is only for mods
+  that read the mod's state reflectively. `isLunarMod()` tells the two kinds of `LunarMod` apart.
+
+Lunar rebuilds a mod's settings list when it reloads that mod's options, which drops the added
+rows. The library checks once a second and appends any that are missing.
+
+If Lunar has no mod with the id, or this Lunar version's settings lists cannot be found, a warning
+is logged and the settings keep working with their default values.
+
 ## Behavior
 
 - **Toggle keybind.** Lunar adds its toggle keybind to every tile automatically, like its own
@@ -154,7 +288,8 @@ drawn.
 - **Storage.** Everything a tile saves (on/off state, every setting, the toggle keybind) is
   stored in `~/.weave/mod-data/1.8.9/lunar-mod-api/settings.json`, not in Lunar's profile. The
   file is written a few seconds after a change and when the game closes. Tiles of mods that are
-  not installed right now are kept in the file.
+  not installed right now are kept in the file. Settings added to Lunar's own mods are stored
+  there too (see above).
 - **`onToggle`** runs whenever the tile is switched on or off. It also runs once with `true` when a
   tile starts enabled, so a mod can do its setup there.
 - **`Keybind.onPress`** runs only while the tile is enabled and no screen is open.
@@ -165,7 +300,10 @@ drawn.
 
 Lunar is obfuscated and renames its classes on every update, so the library finds its mod system
 by structure at runtime: the mod manager is identified by its `mods.json` file name, and each
-setting control by the UI type its builder reports. The result is cached per Lunar build in
+setting control by the UI type its builder reports. A mod's settings list is its options trait:
+the trait whose interface rebuilds itself from a mod and hands out sets of options. Of those
+sets, the live list is the one that comes back as the same object on every call. The result is
+cached per Lunar build in
 `~/.weave/cache/lunar/lunar-mod-api/<build>.properties`. The cache is keyed by a hash of Lunar's
 build data and checks a fingerprint of every class involved.
 
@@ -173,6 +311,8 @@ build data and checks a fingerprint of every class involved.
   appear a moment after the title screen.
 - **On every other launch**, the cached members are restored directly.
 - **To force a fresh lookup**, start the game with `-Dweave.lunar.cache=false`.
+- **A result missing the HUD editor or the settings lists** is not cached, so the lookup runs
+  again on the next launch. Tiles still work without either.
 
 ## Building
 

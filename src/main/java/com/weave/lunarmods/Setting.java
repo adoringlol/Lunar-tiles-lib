@@ -1,5 +1,8 @@
 package com.weave.lunarmods;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
+import com.google.gson.JsonPrimitive;
 import com.weave.lunarmods.internal.Log;
 import com.weave.lunarmods.internal.lunar.LunarBridge;
 
@@ -98,6 +101,51 @@ public abstract class Setting<T, S extends Setting<T, S>> extends Element<S> {
             local = current;
             notifyListeners(current);
         }
+    }
+
+    /** Enums are saved by name; every other setting value is a boolean, number or string. */
+    @Override
+    JsonElement save() {
+        T value = get();
+        if (value instanceof Enum) {
+            return new JsonPrimitive(((Enum<?>) value).name());
+        }
+        if (value instanceof Boolean) {
+            return new JsonPrimitive((Boolean) value);
+        }
+        if (value instanceof Number) {
+            return new JsonPrimitive((Number) value);
+        }
+        return value == null ? JsonNull.INSTANCE : new JsonPrimitive(value.toString());
+    }
+
+    /** Reads the value as the default value's type; an unreadable value keeps the current one. */
+    @Override
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void load(JsonElement json) {
+        if (json == null || !json.isJsonPrimitive()) {
+            return;
+        }
+        Object value;
+        try {
+            if (defaultValue instanceof Enum) {
+                value = Enum.valueOf(((Enum) defaultValue).getDeclaringClass(), json.getAsString());
+            } else if (defaultValue instanceof Boolean) {
+                value = json.getAsBoolean();
+            } else if (defaultValue instanceof Integer) {
+                value = json.getAsInt();
+            } else if (defaultValue instanceof Float) {
+                value = json.getAsFloat();
+            } else if (defaultValue instanceof Double) {
+                value = json.getAsDouble();
+            } else {
+                value = json.getAsString();
+            }
+        } catch (RuntimeException unreadable) {
+            Log.warn("Ignoring the saved value of setting '" + id + "' in '" + mod.id() + "': " + json);
+            return;
+        }
+        set((T) value);
     }
 
     private void notifyListeners(T value) {

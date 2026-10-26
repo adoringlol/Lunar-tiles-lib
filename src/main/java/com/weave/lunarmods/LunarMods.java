@@ -59,6 +59,36 @@ public final class LunarMods {
         }
     }
 
+    /**
+     * One of Lunar's own mods, by the id Lunar gives it, so you can add settings to it. Media Player
+     * is {@code "MEDIA_PLAYER"}; case, spaces, dashes and underscores are ignored when matching.
+     * Every call with the same id returns the same object.
+     *
+     * <p>Settings added here appear at the end of that mod's settings panel, and their values are
+     * saved by this library. {@link LunarMod#isEnabled()} and {@link LunarMod#onToggle} follow the
+     * Lunar mod's own switch. Lunar's mods keep their own HUD element, so {@code hud} and
+     * {@code textHud} are not available. An id Lunar does not have is logged, and its settings keep
+     * working with their default values.
+     */
+    public static LunarMod lunarMod(String lunarId) {
+        String key = "lunar:" + (lunarId == null ? "" : lunarId.trim().replaceAll("[\\s_-]+", "").toLowerCase(java.util.Locale.ROOT));
+        synchronized (mods) {
+            LunarMod existing = mods.get(key);
+            if (existing == null) {
+                existing = LunarMod.lunarOwned(lunarId == null ? "" : lunarId.trim());
+                mods.put(key, existing);
+            }
+            return existing;
+        }
+    }
+
+    /** {@link #lunarMod(String)} and configuration in one step. */
+    public static LunarMod lunarMod(String lunarId, Consumer<LunarMod> setup) {
+        LunarMod mod = lunarMod(lunarId);
+        setup.accept(mod);
+        return mod;
+    }
+
     /** Claims a tile and configures it in one step: {@code LunarMods.mod("my_tile", mod -> { ... })}. */
     public static LunarMod mod(String id, Consumer<LunarMod> setup) {
         LunarMod mod = mod(id);

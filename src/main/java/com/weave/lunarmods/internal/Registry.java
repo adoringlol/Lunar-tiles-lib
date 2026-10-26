@@ -26,6 +26,10 @@ public final class Registry {
     /** Lunar normally finishes starting before the first tick; this covers slow machines. */
     private static final int MAX_ATTEMPTS = 10;
     private static final int RETRY_DELAY_TICKS = 40;
+    /** How often settings added to Lunar's own mods are re-added after Lunar rebuilt a mod's list. */
+    private static final int REINJECT_INTERVAL_TICKS = 20;
+    /** Settings of Lunar's own mods are stored under this prefix, apart from the tiles. */
+    private static final String LUNAR_MOD_PREFIX = "lunar:";
 
     private enum State { WAITING, DISCOVERING, RUNNING, OFF }
 
@@ -33,6 +37,10 @@ public final class Registry {
     /** Tiles that tick: those registered with Lunar plus those running without it. */
     private static final List<TileHandle> active = new ArrayList<TileHandle>();
     private static final Map<String, Object> features = new LinkedHashMap<String, Object>();
+    private static final Map<String, InjectionHandle> injections = new LinkedHashMap<String, InjectionHandle>();
+    /** Injections that tick, with the Lunar mod each was added to (none when running without Lunar). */
+    private static final Map<InjectionHandle, Object> injected = new LinkedHashMap<InjectionHandle, Object>();
+    private static int ticksUntilReinject = REINJECT_INTERVAL_TICKS;
 
     private static State state = State.WAITING;
     private static FutureTask<LunarBridge> discovery;
@@ -62,28 +70,59 @@ public final class Registry {
         }
     }
 
+    /** Called when a mod first asks for one of Lunar's own mods. Its settings are added on the next client tick. */
+    public static synchronized void inject(InjectionHandle handle) {
+        String id = handle.definition().lunarId;
+        if (injections.containsKey(id)) {
+            return;
+        }
+        injections.put(id, handle);
+        if (state == State.OFF) {
+            standalone(handle);
+        } else if (state == State.RUNNING) {
+            attach(handle);
+        }
+    }
+
     public static synchronized boolean isRunning() {
         return state == State.RUNNING;
     }
 
     public static void tick() {
         TileHandle[] ticking;
+        InjectionHandle[] tickingInjections;
+        boolean reinject;
         synchronized (Registry.class) {
-            if (state == State.WAITING && !claimed.isEmpty() && --retryIn <= 0) {
+            if (state == State.WAITING && (!claimed.isEmpty() || !injections.isEmpty()) && --retryIn <= 0) {
                 start();
             } else if (state == State.DISCOVERING && discovery.isDone()) {
                 finishDiscovery();
             }
-            if (active.isEmpty()) {
+            if (active.isEmpty() && injected.isEmpty()) {
                 return;
             }
             ticking = active.toArray(new TileHandle[0]);
+            tickingInjections = injected.keySet().toArray(new InjectionHandle[0]);
+            reinject = --ticksUntilReinject <= 0;
+            if (reinject) {
+                ticksUntilReinject = REINJECT_INTERVAL_TICKS;
+            }
         }
         for (TileHandle handle : ticking) {
             try {
                 handle.tick();
             } catch (RuntimeException exception) {
                 Log.error("Tile '" + handle.definition().id + "' failed while ticking", exception);
+            }
+        }
+        for (InjectionHandle handle : tickingInjections) {
+            if (reinject) {
+                reinject(handle);
+            }
+            try {
+                handle.tick();
+            } catch (RuntimeException exception) {
+                Log.error("Settings added to Lunar's mod '" + handle.definition().id + "' failed while ticking", exception);
             }
         }
         if (--ticksUntilSave <= 0) {
@@ -165,10 +204,70 @@ public final class Registry {
         for (TileHandle handle : claimed.values()) {
             attach(handle);
         }
+        for (InjectionHandle handle : injections.values()) {
+            attach(handle);
+        }
         bridge.refresh();
         state = State.RUNNING;
         lastWritten = snapshot();
-        Log.info("Added " + features.size() + " tile(s) to Lunar's mod menu; settings are saved to " + Storage.file());
+        Log.info("Added " + features.size() + " tile(s) to Lunar's mod menu and settings to " + countInjected()
+                + " of Lunar's own mod(s); settings are saved to " + Storage.file());
+    }
+
+    private static int countInjected() {
+        int count = 0;
+        for (Object feature : injected.values()) {
+            if (feature != null) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** Adds a mod's settings to the end of one of Lunar's own mods' settings panel. */
+    private static void attach(InjectionHandle handle) {
+        TileDefinition tile = handle.definition();
+        if (!bridge.supportsInjection()) {
+            Log.warn("Settings cannot be added to Lunar's mod '" + tile.id + "' in this Lunar version; they keep their defaults.");
+            standalone(handle);
+            return;
+        }
+        try {
+            Object feature = bridge.findFeature(tile.lunarId);
+            if (feature == null) {
+                Log.warn("Lunar has no mod with id '" + tile.id + "'; its added settings keep their defaults.");
+                standalone(handle);
+                return;
+            }
+            List<Object> options = handle.options(bridge);
+            JsonElement saved = stored.get(LUNAR_MOD_PREFIX + tile.lunarId);
+            handle.attached(bridge, feature, saved != null && saved.isJsonObject() ? saved.getAsJsonObject() : null);
+            bridge.injectOptions(feature, options);
+            injected.put(handle, feature);
+        } catch (Exception | LinkageError failed) {
+            Log.error("Could not add settings to Lunar's mod '" + tile.id + "'", LunarBridge.unwrap(failed));
+            standalone(handle);
+        }
+    }
+
+    /** Lunar rebuilds a mod's settings list when it reloads its options; put the added rows back. */
+    private static void reinject(InjectionHandle handle) {
+        Object feature;
+        synchronized (Registry.class) {
+            feature = injected.get(handle);
+        }
+        if (feature == null) {
+            return;
+        }
+        try {
+            bridge.injectOptions(feature, handle.options(bridge));
+        } catch (Exception | LinkageError failed) {
+            Log.error("Could not re-add settings to Lunar's mod '" + handle.definition().id + "'; they stay hidden",
+                    LunarBridge.unwrap(failed));
+            synchronized (Registry.class) {
+                injected.put(handle, null);
+            }
+        }
     }
 
     private static void attach(final TileHandle handle) {
@@ -215,6 +314,20 @@ public final class Registry {
         for (TileHandle handle : claimed.values()) {
             standalone(handle);
         }
+        for (InjectionHandle handle : injections.values()) {
+            standalone(handle);
+        }
+    }
+
+    private static void standalone(InjectionHandle handle) {
+        if (!injected.containsKey(handle)) {
+            injected.put(handle, null);
+        }
+        try {
+            handle.standalone();
+        } catch (RuntimeException exception) {
+            Log.error("Settings added to Lunar's mod '" + handle.definition().id + "' failed to start", exception);
+        }
     }
 
     private static void standalone(TileHandle handle) {
@@ -256,6 +369,12 @@ public final class Registry {
             } catch (Exception | LinkageError failed) {
                 Log.error("Could not read settings of tile " + entry.getKey(), LunarBridge.unwrap(failed));
                 return null;
+            }
+        }
+        // Lunar saves its own mods in its profile; the values of settings added to them live here.
+        for (Map.Entry<InjectionHandle, Object> entry : injected.entrySet()) {
+            if (entry.getValue() != null) {
+                tiles.add(LUNAR_MOD_PREFIX + entry.getKey().definition().lunarId, entry.getKey().save());
             }
         }
         return Storage.serialize(tiles);

@@ -21,6 +21,7 @@ import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.function.BiFunction;
@@ -40,7 +41,7 @@ import java.util.function.Supplier;
 final class Discovery {
     static final String NAMESPACE = "lunar-mod-api";
     /** Bump when the set or meaning of cached keys changes. */
-    private static final String SCHEMA = "5";
+    private static final String SCHEMA = "6";
     private static final String CLIENT_PACKAGE = "com.moonsworth.lunar.client.";
     private static final String PROBE_ID = "lunarModApiProbe";
 
@@ -89,15 +90,22 @@ final class Discovery {
         Field items = managerItems(manager);
         Class<?> base = findBaseFeature(feature, (Collection<?>) items.get(managerInstance));
         resolveMembers(manager, feature, base, found);
+        ClassSource loaded = new ClassSource() {
+            @Override
+            public List<Class<?>> classesIn(String packageName) {
+                return LunarRuntime.loadedClasses(packageName + ".");
+            }
+        };
         try {
-            resolveHud(feature, base, new ClassSource() {
-                @Override
-                public List<Class<?>> classesIn(String packageName) {
-                    return LunarRuntime.loadedClasses(packageName + ".");
-                }
-            }, found);
+            resolveHud(feature, base, loaded, found);
         } catch (Exception | LinkageError failed) {
             Log.warn("Lunar's HUD editor was not found in this Lunar version; tiles work, but their HUD elements are not shown: " + failed);
+        }
+        try {
+            resolveInjection(feature, base, loaded, found);
+        } catch (Exception | LinkageError failed) {
+            Log.warn("The settings lists of Lunar's own mods were not found in this Lunar version; tiles work, "
+                    + "but settings cannot be added to Lunar's mods: " + failed);
         }
 
         Log.info(String.format("Resolved Lunar internals in %.1f ms.", (System.nanoTime() - started) / 1e6));
@@ -165,17 +173,7 @@ final class Discovery {
     static void resolveHud(Class<?> feature, Class<?> base, ClassSource classes, Map<String, Object> found) throws Exception {
         Map<String, Object> hud = new LinkedHashMap<String, Object>();
 
-        Set<Class<?>> keys = new LinkedHashSet<Class<?>>();
-        for (Method method : feature.getMethods()) {
-            Class<?>[] parameters = method.getParameterTypes();
-            if (!isStatic(method) && parameters.length >= 1 && isTraitKey(parameters[0])) {
-                keys.add(parameters[0]);
-            }
-        }
-        if (keys.size() != 1) {
-            throw new IllegalStateException("Expected one mod trait key type, found " + keys);
-        }
-        final Class<?> key = keys.iterator().next();
+        final Class<?> key = traitKeyType(feature);
         hud.put(Keys.TRAIT_SET, inHierarchy(base, Object.class, "mod trait setter", m -> !isStatic(m)
                 && Modifier.isPublic(m.getModifiers()) && m.getReturnType() == Object.class
                 && Arrays.equals(m.getParameterTypes(), new Class<?>[]{key, Object.class})));
@@ -262,6 +260,97 @@ final class Discovery {
                 && Arrays.equals(m.getParameterTypes(), new Class<?>[]{int.class, int.class, int.class, int.class, int.class, int.class})));
 
         found.putAll(hud);
+    }
+
+    /**
+     * Lunar keeps a mod's settings in its options trait, whose live set of option rows is what the
+     * settings panel lists. This finds the trait's key and the getter that reads a trait off a mod,
+     * so a library mod can append rows to one of Lunar's own mods. Both are added to {@code found}
+     * together, or neither is.
+     */
+    static void resolveInjection(Class<?> feature, Class<?> base, ClassSource classes, Map<String, Object> found) throws Exception {
+        final Class<?> key = traitKeyType(feature);
+        Method find = null;
+        for (Method method : base.getMethods()) {
+            if (!isStatic(method) && method.getReturnType() == Optional.class
+                    && Arrays.equals(method.getParameterTypes(), new Class<?>[]{key})) {
+                if (find != null) {
+                    throw new IllegalStateException("Several optional trait getters: " + find + ", " + method);
+                }
+                find = method;
+            }
+        }
+        if (find == null) {
+            throw new IllegalStateException("The optional trait getter was not found above " + base.getName());
+        }
+
+        Class<?> option = ((Method) found.get(Keys.REGISTRAR_ADD)).getParameterTypes()[0].getComponentType();
+        Field trait = null;
+        String featurePackage = packageOf(feature);
+        for (Class<?> holder : classes.classesIn(featurePackage)) {
+            if (!packageOf(holder).equals(featurePackage)) {
+                continue;
+            }
+            for (Field field : declaredFields(holder)) {
+                if (!Modifier.isStatic(field.getModifiers()) || field.getType() != key
+                        || !(field.getGenericType() instanceof ParameterizedType)) {
+                    continue;
+                }
+                Type argument = ((ParameterizedType) field.getGenericType()).getActualTypeArguments()[0];
+                if (argument instanceof Class && isOptionsTrait((Class<?>) argument, feature, option)) {
+                    if (trait != null) {
+                        throw new IllegalStateException("Several options trait keys: " + trait + ", " + field);
+                    }
+                    trait = field;
+                }
+            }
+        }
+        if (trait == null) {
+            throw new IllegalStateException("The options trait key was not found in " + featurePackage);
+        }
+        found.put(Keys.TRAIT_FIND, Members.accessible(find));
+        found.put(Keys.OPTIONS_TRAIT, Members.accessible(trait));
+    }
+
+    /** The one type mods take as a trait key; HUD elements and settings lists are both traits. */
+    private static Class<?> traitKeyType(Class<?> feature) {
+        Set<Class<?>> keys = new LinkedHashSet<Class<?>>();
+        for (Method method : feature.getMethods()) {
+            Class<?>[] parameters = method.getParameterTypes();
+            if (!isStatic(method) && parameters.length >= 1 && isTraitKey(parameters[0])) {
+                keys.add(parameters[0]);
+            }
+        }
+        if (keys.size() != 1) {
+            throw new IllegalStateException("Expected one mod trait key type, found " + keys);
+        }
+        return keys.iterator().next();
+    }
+
+    /**
+     * The options trait rebuilds itself from a mod ({@code void (feature)}) and hands out sets of
+     * options. Another trait shares the rebuild shape but lists strings, so the set's element type
+     * is checked too.
+     */
+    private static boolean isOptionsTrait(Class<?> type, Class<?> feature, Class<?> option) {
+        if (!type.isInterface()) {
+            return false;
+        }
+        boolean rebuild = false;
+        boolean options = false;
+        for (Method method : type.getMethods()) {
+            if (isStatic(method)) {
+                continue;
+            }
+            if (method.getReturnType() == void.class && Arrays.equals(method.getParameterTypes(), new Class<?>[]{feature})) {
+                rebuild = true;
+            } else if (method.getParameterCount() == 0 && method.getReturnType() == Set.class
+                    && method.getGenericReturnType() instanceof ParameterizedType) {
+                Type element = ((ParameterizedType) method.getGenericReturnType()).getActualTypeArguments()[0];
+                options |= erase(element) == option;
+            }
+        }
+        return rebuild && options;
     }
 
     /**
